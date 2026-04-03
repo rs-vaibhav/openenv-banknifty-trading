@@ -1,3 +1,12 @@
+---
+title: BankNifty OpenEnv Risk Manager
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # BankNifty Risk Manager OpenEnv
 
 A real-world reinforcement learning environment built for the Meta PyTorch OpenEnv Hackathon. 
