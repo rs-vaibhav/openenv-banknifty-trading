@@ -1,0 +1,8 @@
+env_name: "BankNifty-RiskManager-v0"
+version: "1.0.0"
+description: "A real-world financial RL environment focusing on risk-adjusted returns and drawdown management using BankNifty options data."
+entry_point: "env:BankNiftyEnv"
+tags:
+  - finance
+  - real-world
+  - risk-management
