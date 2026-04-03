@@ -7,12 +7,11 @@ class LLMAgent:
     """A baseline agent that uses an LLM to make trading decisions."""
     def __init__(self, action_space):
         self.action_space = action_space
-        # MANDATORY: Must use OpenAI Client and specific variables
         self.client = OpenAI(
-            base_url=os.environ.get("API_BASE_URL"),
-            api_key=os.environ.get("HF_TOKEN")
+            base_url=os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1/"),
+            api_key=os.environ.get("HF_TOKEN", "dummy_token_to_prevent_crash")
         )
-        self.model_name = os.environ.get("MODEL_NAME")
+        self.model_name = os.environ.get("MODEL_NAME", "dummy-model")
 
     def predict(self, obs):
         close_price = obs[0]
