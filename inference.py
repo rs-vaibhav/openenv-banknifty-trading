@@ -1,4 +1,6 @@
 import os
+import json
+import collections
 from openai import OpenAI
 from env import BankNiftyEnv
 
@@ -18,7 +20,7 @@ def log_end(success: bool, steps: int, rewards: list) -> None:
 
 # --- AGENT LOGIC ---
 class LLMAgent:
-    """A baseline agent that uses an LLM to make trading decisions."""
+    """An elite, stateful CoT agent with strict risk-management guardrails."""
     def __init__(self, action_space):
         self.action_space = action_space
         self.client = OpenAI(
@@ -26,26 +28,94 @@ class LLMAgent:
             api_key=os.environ.get("HF_TOKEN", "dummy_token_to_prevent_crash")
         )
         self.model_name = os.environ.get("MODEL_NAME", "dummy-model")
+        
+        # Memory and Risk Trackers
+        self.price_history = collections.deque(maxlen=5) # Rolling window of 5 ticks
+        self.initial_balance = None
+        self.peak_balance = None
 
     def predict(self, obs):
         close_price = obs[0]
         delta = obs[4]
-        prompt = f"BankNifty Data: Close={close_price:.2f}, Delta={delta:.2f}. Reply with ONE number: 0 to Hold, 1 to Buy, 2 to Sell."
+        current_balance = obs[8]
+        shares_held = obs[9]
         
+        # Initialize risk trackers on the very first step
+        if self.initial_balance is None:
+            self.initial_balance = current_balance
+            self.peak_balance = current_balance
+            
+        # Update price history and peak net worth
+        self.price_history.append(close_price)
+        if current_balance > self.peak_balance:
+            self.peak_balance = current_balance
+            
+        # Calculate real-time risk and trend
+        drawdown = (self.peak_balance - current_balance) / self.peak_balance
+        
+        trend = "NEUTRAL"
+        if len(self.price_history) >= 2:
+            if self.price_history[-1] > self.price_history[0]:
+                trend = "UPTREND"
+            elif self.price_history[-1] < self.price_history[0]:
+                trend = "DOWNTREND"
+
+        # The Professional CoT Prompt
+        system_prompt = """You are an elite quantitative AI trading agent. 
+Your goal is to maximize ROI while STRICTLY keeping maximum drawdown under 10%.
+You must output your response in valid JSON format containing exactly two keys:
+1. "analysis": A brief 1-sentence reasoning based on the trend, delta, and risk.
+2. "action": An integer representing your decision (0=Hold, 1=Buy, 2=Sell)."""
+
+        user_prompt = f"""--- MARKET DATA ---
+Current Price: {close_price:.2f}
+Recent Trend (last {len(self.price_history)} ticks): {trend}
+Delta (ATM): {delta:.2f}
+
+--- PORTFOLIO RISK ---
+Current Balance: {current_balance:.2f}
+Shares Held: {shares_held}
+Current Drawdown: {drawdown*100:.2f}% (CRITICAL: Must stay under 10%)
+
+Analyze the data and return the JSON."""
+
         try:
+            # Force the model to think and return JSON
             response = self.client.chat.completions.create(
                 model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=5,
-                temperature=0.0
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=150,
+                temperature=0.1 # Low temperature for logical, deterministic answers
             )
-            action_str = response.choices[0].message.content.strip()
             
-            if '1' in action_str: return 1
-            elif '2' in action_str: return 2
-            else: return 0
-        except Exception:
-            return 0  # Fallback to Hold
+            content = response.choices[0].message.content.strip()
+            
+            # Clean markdown blocks if the LLM wraps the JSON in ```json ... ```
+            if content.startswith("```json"):
+                content = content.replace("```json", "").replace("```", "").strip()
+            elif content.startswith("```"):
+                content = content.replace("```", "").strip()
+                
+            output = json.loads(content)
+            action = int(output.get("action", 0))
+            
+            # --- THE QUANT GUARDRAIL ---
+            # If the LLM makes a risky choice near the ruin limit, the algorithm overrides it.
+            if drawdown > 0.085 and action == 1: 
+                return 0 # Force a HOLD to protect capital
+                
+            # If we hold shares and drawdown is getting dangerous, force a panic sell
+            if drawdown > 0.09 and shares_held > 0 and action != 2:
+                return 2 # Force SELL to realize remaining capital
+                
+            return action
+            
+        except Exception as e:
+            # If the LLM fails to return valid JSON, fall back safely
+            return 0
 
 
 # --- EVALUATION LOOP ---
