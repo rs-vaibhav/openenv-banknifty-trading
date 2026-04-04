@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "banknifty-openenv"
+version = "0.1.0"
+description = "BankNifty Options Trading Environment for OpenEnv"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "gymnasium",
+    "pandas",
+    "numpy",
+    "openenv-core",
+    "openai",
+    "fastapi",
+    "uvicorn"
+]
