@@ -1,8 +1,22 @@
 import os
-import numpy as np
 from openai import OpenAI
 from env import BankNiftyEnv
 
+# --- MANDATORY STDOUT LOGGING FORMATTERS ---
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+def log_step(step: int, action: str, reward: float, done: bool, error: str = None) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(f"[STEP] step={step} action={action} reward={float(reward):.2f} done={done_val} error={error_val}", flush=True)
+
+def log_end(success: bool, steps: int, rewards: list) -> None:
+    rewards_str = ",".join(f"{float(r):.2f}" for r in rewards)
+    print(f"[END] success={str(success).lower()} steps={steps} rewards={rewards_str}", flush=True)
+
+
+# --- AGENT LOGIC ---
 class LLMAgent:
     """A baseline agent that uses an LLM to make trading decisions."""
     def __init__(self, action_space):
@@ -16,11 +30,9 @@ class LLMAgent:
     def predict(self, obs):
         close_price = obs[0]
         delta = obs[4]
-        
-        prompt = f"BankNifty Data: Close={close_price:.2f}, Delta={delta:.2f}. You are an AI agent. Reply with exactly ONE number: 0 to Hold, 1 to Buy, 2 to Sell."
+        prompt = f"BankNifty Data: Close={close_price:.2f}, Delta={delta:.2f}. Reply with ONE number: 0 to Hold, 1 to Buy, 2 to Sell."
         
         try:
-            # We keep max_tokens tiny so the inference runs fast
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
@@ -32,69 +44,54 @@ class LLMAgent:
             if '1' in action_str: return 1
             elif '2' in action_str: return 2
             else: return 0
-        except Exception as e:
-            # Fallback to hold if the API rate limits or drops to ensure the script doesn't crash
-            return 0
+        except Exception:
+            return 0  # Fallback to Hold
 
-# REDUCED STEPS to strictly comply with the "under 20min" runtime limit
-def grade_easy_task(env, agent, steps=10):
-    obs, _ = env.reset()
-    actions_taken = set()
-    for _ in range(steps):
-        action = agent.predict(obs)
-        actions_taken.add(action)
-        obs, _, terminated, _, _ = env.step(action)
-        if terminated: break
-    score = 1.0 if (1 in actions_taken and 2 in actions_taken) else 0.0
-    return score
 
-def grade_medium_task(env, agent, steps=30):
-    obs, _ = env.reset()
-    initial_net_worth = env.initial_balance
-    for _ in range(steps):
-        action = agent.predict(obs)
-        obs, _, terminated, _, info = env.step(action)
-        if terminated: break
-    roi = (info['net_worth'] - initial_net_worth) / initial_net_worth
-    score = np.clip(roi / 0.05, 0.0, 1.0)
-    return float(score)
+# --- EVALUATION LOOP ---
+def run_task(env, agent, task_name, max_steps):
+    model_name = os.getenv("MODEL_NAME", "dummy-model")
+    benchmark_name = "BankNifty-RiskManager"
+    
+    # 1. Emit [START] log
+    log_start(task=task_name, env=benchmark_name, model=model_name)
 
-def grade_hard_task(env, agent, steps=50):
     obs, _ = env.reset()
-    initial_net_worth = env.initial_balance
-    peak_net_worth = initial_net_worth
-    max_drawdown = 0.0
-    for _ in range(steps):
+    rewards = []
+    steps_taken = 0
+    success = False
+
+    for step in range(1, max_steps + 1):
         action = agent.predict(obs)
-        obs, _, terminated, _, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
         
-        if info['net_worth'] > peak_net_worth:
-            peak_net_worth = info['net_worth']
-        drawdown = (peak_net_worth - info['net_worth']) / peak_net_worth
-        if drawdown > max_drawdown:
-            max_drawdown = drawdown
-        if terminated: break
+        rewards.append(reward)
+        steps_taken = step
 
-    roi = (info['net_worth'] - initial_net_worth) / initial_net_worth
-    if max_drawdown > 0.10: return 0.0
-    score = np.clip(roi / 0.10, 0.0, 1.0)
-    return float(score)
+        # Convert numeric action to a string action for the log
+        action_map = {0: "hold()", 1: "buy()", 2: "sell()"}
+        action_str = action_map.get(action, "hold()")
+
+        # 2. Emit [STEP] log
+        log_step(step=step, action=action_str, reward=reward, done=done, error=None)
+
+        if done:
+            success = info.get('net_worth', 0) > env.initial_balance
+            break
+
+    if not done:
+        success = info.get('net_worth', 0) > env.initial_balance
+
+    # 3. Emit [END] log
+    log_end(success=success, steps=steps_taken, rewards=rewards)
+
 
 if __name__ == "__main__":
-    print("--- Starting OpenEnv LLM Baseline Inference ---")
-    
-    # Quick check to ensure the evaluator provided the variables
-    if not all(os.environ.get(k) for k in ["API_BASE_URL", "MODEL_NAME", "HF_TOKEN"]):
-        print("WARNING: Required environment variables are missing! Scores may default to 0.")
-
     env = BankNiftyEnv(data_path='banknifty_historical_data.csv')
     agent = LLMAgent(env.action_space)
     
-    easy_score = grade_easy_task(env, agent)
-    print(f"Easy Task Score: {easy_score:.2f} / 1.0")
-    
-    medium_score = grade_medium_task(env, agent)
-    print(f"Medium Task Score: {medium_score:.2f} / 1.0")
-    
-    hard_score = grade_hard_task(env, agent)
-    print(f"Hard Task Score: {hard_score:.2f} / 1.0")
+    # We run the 3 required tasks with very small step counts to ensure it stays well under the 20-minute limit
+    run_task(env, agent, task_name="easy-api-compliance", max_steps=5)
+    run_task(env, agent, task_name="medium-short-term-roi", max_steps=10)
+    run_task(env, agent, task_name="hard-risk-adjusted", max_steps=15)
