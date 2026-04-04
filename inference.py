@@ -101,6 +101,8 @@ Analyze the data and return the JSON."""
                 
             output = json.loads(content)
             action = int(output.get("action", 0))
+            print(f"\n🤖 [THINKING]: {output.get('analysis')}")
+            print(f"📈 [ACTION]: {action} | Drawdown: {drawdown*100:.2f}% | Trend: {trend}")
             
             # --- THE QUANT GUARDRAIL ---
             # If the LLM makes a risky choice near the ruin limit, the algorithm overrides it.
