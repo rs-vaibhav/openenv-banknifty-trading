@@ -15,7 +15,7 @@ dependencies = [
     "openenv-core",
     "openai",
     "fastapi",
-    "uvicorn"
+    "uvicorn",
 ]
 
 [project.scripts]
