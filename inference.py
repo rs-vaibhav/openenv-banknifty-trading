@@ -24,7 +24,7 @@ class LLMAgent:
     def __init__(self, action_space):
         self.action_space = action_space
         self.client = OpenAI(
-            base_url=os.environ.get("API_BASE_URL", "https://api-inference.huggingface.co/v1/"),
+            base_url=os.environ.get("API_BASE_URL", "https://router.huggingface.co/hf-inference/v1"),
             api_key=os.environ.get("HF_TOKEN", "dummy_token_to_prevent_crash")
         )
         self.model_name = os.environ.get("MODEL_NAME", "dummy-model")
@@ -116,7 +116,8 @@ Analyze the data and return the JSON."""
             return action
             
         except Exception as e:
-            # If the LLM fails to return valid JSON, fall back safely
+            # ---> ADD THIS PRINT STATEMENT <---
+            print(f"🚨 [DEBUG] Agent Error: {e}")
             return 0
 
 

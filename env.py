@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 from gymnasium import spaces
-from openenv.env import Env
+from openenv.core import Environment
 
-class BankNiftyEnv(Env):
+class BankNiftyEnv(Environment):
     def __init__(self, data_path='banknifty_historical_data.csv', initial_balance=100000.0):
         super().__init__()
         
@@ -38,15 +38,25 @@ class BankNiftyEnv(Env):
         self.net_worth = self.initial_balance
         self.max_steps = len(self.df) - 1
 
+    def state(self):
+        """Mandatory method required by the OpenEnv Environment base class."""
+        return self._get_obs()
+
+    
     def reset(self, seed=None, options=None):
-        """Resets the environment to the starting state."""
-        # Removed super().reset() as openenv.Env does not implement it
-        self.current_step = 0
-        self.balance = self.initial_balance
-        self.shares_held = 0
-        self.net_worth = self.initial_balance
+        super().reset(seed=seed)
         
-        return self._get_obs(), self._get_info()
+        # Reset all our new Quant tracking variables
+        self.balance = self.initial_balance
+        self.current_step = 0
+        self.position = 0  # 0 = Flat, 1 = Long
+        self.entry_price = 0.0
+        self.peak_balance = self.initial_balance
+        self.max_drawdown = 0.0
+        
+        obs = self._get_obs()
+        info = {"net_worth": self.balance, "drawdown": 0.0}
+        return obs, info
 
     def _get_obs(self):
         """Constructs the observation vector for the current step."""
@@ -64,39 +74,51 @@ class BankNiftyEnv(Env):
         }
 
     def step(self, action):
-        """Executes one time step within the environment."""
+        # We assume standard integer actions from the LLM (0=Hold, 1=Buy, 2=Sell)
+        price = self.df.iloc[self.current_step]["close"]
+        reward = 0.0
+
+        # -------- ACTION LOGIC --------
+        if action == 1:  # BUY
+            if self.position == 0:
+                self.position = 1
+                self.entry_price = price
+
+        elif action == 2:  # SELL
+            if self.position == 1:
+                profit = price - self.entry_price
+                self.balance += profit
+                reward += profit  # Reward the agent for realized profit
+                self.position = 0
+
+        # -------- QUANT RISK MANAGEMENT --------
+        # 1. Hard Stop Loss (2%)
+        if self.position == 1:
+            loss_pct = (price - self.entry_price) / self.entry_price
+            if loss_pct < -0.02:
+                loss = price - self.entry_price
+                self.balance += loss
+                self.position = 0  # Forced liquidation to protect capital
+                reward += loss     # Penalize the agent for hitting the stop loss
+
+        # 2. Dynamic Drawdown Tracking
+        if self.balance > self.peak_balance:
+            self.peak_balance = self.balance
+            
+        drawdown = (self.peak_balance - self.balance) / self.peak_balance
+        self.max_drawdown = max(self.max_drawdown, drawdown)
+
+        # 3. Drawdown Penalty (Avoid > 5% as per the rules)
+        if drawdown > 0.05:
+            reward -= 10.0  # Heavy algorithmic penalty for risking ruin
+
+        # -------- NEXT STEP --------
         self.current_step += 1
-        
-        # Check if we hit the end of the historical data
-        terminated = self.current_step >= self.max_steps
+        terminated = self.current_step >= len(self.df) - 1
         truncated = False
         
-        if terminated:
-            return self._get_obs(), 0.0, terminated, truncated, self._get_info()
+        obs = self._get_obs()
+        info = {"net_worth": self.balance, "drawdown": drawdown}
 
-        current_price = self.df.loc[self.current_step, 'close']
-        prev_net_worth = self.net_worth
-        
-        # Execute Action Logic
-        if action == 1:  # Buy
-            if self.balance >= current_price:
-                self.shares_held += 1
-                self.balance -= current_price
-        elif action == 2:  # Sell
-            if self.shares_held > 0:
-                self.shares_held -= 1
-                self.balance += current_price
-        # Note: Action 0 (Hold) requires no logic
-
-        # Update portfolio value
-        self.net_worth = self.balance + (self.shares_held * current_price)
-        
-        # Reward Function: Change in net worth
-        reward = self.net_worth - prev_net_worth
-        
-        # Ruin condition: If the agent loses 50% of the portfolio, end the episode early
-        if self.net_worth <= self.initial_balance * 0.5:
-            terminated = True
-            reward -= 10000.0  # Massive penalty for blowing up the account
-
-        return self._get_obs(), float(reward), terminated, truncated, self._get_info()
+        # MANDATORY: Return the standard Gymnasium tuple so the web server doesn't crash!
+        return obs, float(reward), terminated, truncated, info
