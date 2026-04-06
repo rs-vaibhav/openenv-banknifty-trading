@@ -1,3 +1,13 @@
+---
+title: BankNifty Risk Manager
+emoji: 📈
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+tags:
+  - openenv
+---
 # 📈 BankNifty Risk Manager (OpenEnv)
 
 ## Environment Description & Motivation
