@@ -25,7 +25,7 @@ class LLMAgent:
         self.action_space = action_space
         self.client = OpenAI(
             base_url=os.environ.get("API_BASE_URL", "https://router.huggingface.co/hf-inference/v1"),
-            api_key=os.environ.get("HF_TOKEN", "dummy_token_to_prevent_crash")
+            api_key=os.environ.get("HF_TOKEN")
         )
         self.model_name = os.environ.get("MODEL_NAME", "dummy-model")
         
