@@ -30,7 +30,7 @@ class LLMAgent:
         self.model_name = os.environ.get("MODEL_NAME", "dummy-model")
         
         # Memory and Risk Trackers
-        self.price_history = collections.deque(maxlen=5) # Rolling window of 5 ticks
+        self.price_history = collections.deque(maxlen=40) # Rolling window of 5 ticks
         self.initial_balance = None
         self.peak_balance = None
 
@@ -40,85 +40,136 @@ class LLMAgent:
         current_balance = obs[8]
         shares_held = obs[9]
         
-        # Initialize risk trackers on the very first step
+        # Initialize risk trackers
         if self.initial_balance is None:
             self.initial_balance = current_balance
             self.peak_balance = current_balance
             
-        # Update price history and peak net worth
         self.price_history.append(close_price)
         if current_balance > self.peak_balance:
             self.peak_balance = current_balance
             
-        # Calculate real-time risk and trend
         drawdown = (self.peak_balance - current_balance) / self.peak_balance
         
         trend = "NEUTRAL"
-        if len(self.price_history) >= 2:
-            if self.price_history[-1] > self.price_history[0]:
+        # --- UPGRADED QUANT TREND LOGIC (20-Period SMA) ---
+        trend = "NEUTRAL"
+        
+        # We need at least 5 ticks to start establishing a real average
+        if len(self.price_history) >= 10:
+            # 1. Calculate the Simple Moving Average
+            sma = sum(self.price_history) / len(self.price_history)
+            
+            # 2. Calculate how far the current price is from the average
+            distance_from_sma = (close_price - sma) / sma
+            
+            # 3. The Chop Filter: Price must break away by 0.1% to be a "real" trend
+            chop_threshold = 0.001 
+            
+            if distance_from_sma > chop_threshold:
                 trend = "UPTREND"
-            elif self.price_history[-1] < self.price_history[0]:
+            elif distance_from_sma < -chop_threshold:
                 trend = "DOWNTREND"
+            else:
+                trend = "NEUTRAL" # It's just noise, ignore it
 
-        # The Professional CoT Prompt
-        system_prompt = """You are an elite quantitative AI trading agent. 
-Your goal is to maximize ROI while STRICTLY keeping maximum drawdown under 10%.
-You must output your response in valid JSON format containing exactly two keys:
-1. "analysis": A brief 1-sentence reasoning based on the trend, delta, and risk.
-2. "action": An integer representing your decision (0=Hold, 1=Buy, 2=Sell)."""
+        # --- THE COUNCIL OF QUANTS PROMPTS ---
+        market_data = f"Price: {close_price:.2f} | Trend: {trend} | Delta: {delta:.2f}"
+        risk_data = f"Balance: {current_balance:.2f} | Shares: {shares_held} | Drawdown: {drawdown*100:.2f}%"
 
-        user_prompt = f"""--- MARKET DATA ---
-Current Price: {close_price:.2f}
-Recent Trend (last {len(self.price_history)} ticks): {trend}
-Delta (ATM): {delta:.2f}
+        # 1. Momentum Agent
+        prompt_momentum = f"""You are a Momentum Trader. 
+Trend: {trend} | Price: {close_price:.2f}
+If UPTREND, output 1. 
+If DOWNTREND, output 2. 
+If NEUTRAL, output 0. 
+Output exactly one digit. Nothing else."""
 
---- PORTFOLIO RISK ---
-Current Balance: {current_balance:.2f}
-Shares Held: {shares_held}
-Current Drawdown: {drawdown*100:.2f}% (CRITICAL: Must stay under 10%)
+        # 2. Contrarian Agent
+        prompt_contrarian = f"""You are a Contrarian Trader. You fade the market.
+Trend: {trend} | Delta: {delta:.2f}
+If UPTREND, output 2. 
+If DOWNTREND, output 1. 
+If NEUTRAL, output 0.
+Output exactly one digit. Nothing else."""
 
-Analyze the data and return the JSON."""
+        # 3. Chief Risk Officer (CRO)
+        prompt_cro = fprompt_cro = f"""You are the Chief Risk Officer.
+Drawdown is {drawdown*100:.2f}%.
+If Drawdown is over 4.00%, output 2.
+If Drawdown is under 4.00%, output 1.
+Output exactly one digit. Nothing else."""
 
-        try:
-            # Force the model to think and return JSON
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=150,
-                temperature=0.1 # Low temperature for logical, deterministic answers
-            )
-            
-            content = response.choices[0].message.content.strip()
-            
-            # Clean markdown blocks if the LLM wraps the JSON in ```json ... ```
-            if content.startswith("```json"):
-                content = content.replace("```json", "").replace("```", "").strip()
-            elif content.startswith("```"):
-                content = content.replace("```", "").strip()
+        def query_agent(prompt_text):
+            """Helper function to query an individual agent"""
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt_text}],
+                    max_tokens=15, # Gave it a little more room to talk
+                    temperature=0.0 
+                )
+                action_str = response.choices[0].message.content.strip()
                 
-            output = json.loads(content)
-            action = int(output.get("action", 0))
-            print(f"\n🤖 [THINKING]: {output.get('analysis')}")
-            print(f"📈 [ACTION]: {action} | Drawdown: {drawdown*100:.2f}% | Trend: {trend}")
-            
-            # --- THE QUANT GUARDRAIL ---
-            # If the LLM makes a risky choice near the ruin limit, the algorithm overrides it.
-            if drawdown > 0.085 and action == 1: 
-                return 0 # Force a HOLD to protect capital
+                # --- NEW PARSING LOGIC ---
+                import re
+                # Look specifically for isolated digits 0, 1, or 2
+                numbers = re.findall(r'\b[012]\b', action_str)
                 
-            # If we hold shares and drawdown is getting dangerous, force a panic sell
-            if drawdown > 0.09 and shares_held > 0 and action != 2:
-                return 2 # Force SELL to realize remaining capital
-                
-            return action
+                if numbers:
+                    # Take the LAST number found, bypassing chatty explanations
+                    return int(numbers[-1]) 
+                else:
+                    # Debug print if it outputs complete nonsense
+                    print(f"⚠️ [PARSE ERROR] Model said: {action_str}")
+                    return 0
+                    
+            except Exception as e:
+                print(f"🚨 [API ERROR]: {e}")
+                return 0
+
+        # --- PARALLEL EXECUTION ---
+        momentum_vote = query_agent(prompt_momentum)
+        contrarian_vote = query_agent(prompt_contrarian)
+        cro_vote = query_agent(prompt_cro)
+
+        print(f"\n🧠 [COUNCIL VOTES] Momentum: {momentum_vote} | Contrarian: {contrarian_vote} | CRO: {cro_vote}")
+
+        # --- THE AGGREGATOR LOGIC ---
+        final_action = 0
+        
+        # Rule 1: The CRO has absolute Veto Power
+        if cro_vote == 2 and shares_held > 0:
+            final_action = 2
+            print("🚨 [AGGREGATOR] CRO Override! Forced Liquidation to protect capital.")
             
-        except Exception as e:
-            # ---> ADD THIS PRINT STATEMENT <---
-            print(f"🚨 [DEBUG] Agent Error: {e}")
-            return 0
+        elif cro_vote == 0:
+            if shares_held > 0 and (momentum_vote == 2 or contrarian_vote == 2):
+                final_action = 2 # Sell if anyone wants out
+            else:
+                final_action = 0
+            print("🛑 [AGGREGATOR] CRO Vetoed buying. Holding or Selling only.")
+            
+        # Rule 2: If CRO Approves (1), the Traders vote
+        else:
+            # AGGRESSIVE MODE: No more Gridlock. 
+            # If Momentum trader has a signal, we take it immediately.
+            if momentum_vote != 0:
+                final_action = momentum_vote
+                print(f"💥 [AGGREGATOR] Aggressive Mode! Trusting Momentum ({momentum_vote}).")
+                
+            # If Momentum is quiet but Contrarian wants to trade, we take it.
+            elif contrarian_vote != 0:
+                final_action = contrarian_vote
+                print(f"💥 [AGGREGATOR] Aggressive Mode! Trusting Contrarian ({contrarian_vote}).")
+                
+            # Only hold if BOTH traders are completely neutral (0)
+            else:
+                final_action = 0
+                print("⚖️ [AGGREGATOR] Both traders are neutral. Holding.")
+
+        return final_action
+                
 
 
 # --- EVALUATION LOOP ---
@@ -129,13 +180,26 @@ def run_task(env, agent, task_name, max_steps):
     # 1. Emit [START] log
     log_start(task=task_name, env=benchmark_name, model=model_name)
 
+    env.task_name = task_name
+
     obs, _ = env.reset()
     rewards = []
     steps_taken = 0
     success = False
 
     for step in range(1, max_steps + 1):
-        action = agent.predict(obs)
+        # -----------------------------------------------------
+        # NEW: The Time's Up Override
+        # If this is the absolute last step and we hold shares, 
+        # force the agent to SELL so we can calculate final PnL.
+        # -----------------------------------------------------
+        shares_held = obs[9] 
+        if step == max_steps and shares_held > 0:
+            print("⏰ [TIME UP] Final step reached! Forcing SELL to close position.")
+            action = 2
+        else:
+            action = agent.predict(obs)
+            
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         
